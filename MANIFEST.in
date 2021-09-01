@@ -1,0 +1,9 @@
+exclude tests
+recursive-exclude tests *
+
+exclude .pre-commit-config.yaml
+exclude codecov.yml
+exclude tox.ini
+
+include LICENSE
+include README.md
