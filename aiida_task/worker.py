@@ -3,15 +3,19 @@ import os
 
 import click
 
-WORKER_LOGGER = logging.getLogger("aiida_worker")
+from aiida_task.cli import OPT_LOGLEVEL
+
+WORKER_ID = f"{os.getuid()}-{os.getpid()}"
+WORKER_LOGGER = logging.getLogger(f"aiida-{WORKER_ID}")
 
 
 @click.command()
-def start_worker():
+@click.option("--log-file")
+@OPT_LOGLEVEL
+def start_worker(log_file, log_level):
     """Start worker"""
-    worker_id = (os.getuid(), os.getpid())
-    # TODO proper logging
-    print(f"Started worker: {worker_id}")
+    WORKER_LOGGER.setLevel(getattr(logging, log_level.upper()))
+    WORKER_LOGGER.info("Started worker")
     # run forever
     while True:
         pass

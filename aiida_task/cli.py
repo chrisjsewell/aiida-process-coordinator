@@ -55,18 +55,19 @@ OPT_WORKDIR = option(
     show_default=True,
     help="Directory to store files",
 )
-
-
-@main.command("start")
-@argument("number", required=False, type=int, default=1)
-@OPT_WORKDIR
-@option(
+OPT_LOGLEVEL = option(
     "--log-level",
     default="info",
     show_default=True,
     type=click.Choice(("debug", "info", "warning", "critical"), case_sensitive=False),
     help="The log level",
 )
+
+
+@main.command("start")
+@argument("number", required=False, type=int, default=1)
+@OPT_WORKDIR
+@OPT_LOGLEVEL
 def circus_start(number, workdir, log_level):
     """Start daemon"""
     worker_name = WATCHER_WORKER_NAME
@@ -94,7 +95,7 @@ def circus_start(number, workdir, log_level):
         # see circus.watchers.Watcher for inputs
         "watchers": [
             {
-                "cmd": "aiida-worker",
+                "cmd": f"aiida-worker  --log-file {logfile_worker} --log-level {log_level}",
                 "name": worker_name,
                 "numprocesses": number,
                 "virtualenv": os.environ.get("VIRTUAL_ENV", None),
