@@ -1,11 +1,12 @@
 import socket
 
-HEADER = 64
-FORMAT = "utf-8"
-DISCONNECT_MESSAGE = "!DISCONNECT"
+HEADER_LEN = 64
+ENCODING = "utf-8"
 SOCKET_FAMILY = socket.AF_INET
 SOCKET_TYPE = socket.SOCK_STREAM
 HEARTBEAT_TIMEOUT_MS = 1000
+HEARTBEAT_HEADER = b"!HEARTBEAT"
+DISCONNECT_HEADER = b"!DISCONNECT"
 
 
 def get_socket_from_fd(fd: int) -> socket.socket:
