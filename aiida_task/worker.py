@@ -1,40 +1,42 @@
 import logging
 import os
 import socket
+import threading
+import time
 
 import click
 
-from aiida_task.cli import OPT_LOGLEVEL
+from .cli import OPT_LOGLEVEL
+from .shared import HEARTBEAT_TIMEOUT_MS, SOCKET_FAMILY, SOCKET_TYPE, get_socket_from_fd
 
 WORKER_ID = f"{os.getuid()}-{os.getpid()}"
-WORKER_LOGGER = logging.getLogger(f"aiida-{WORKER_ID}")
+WORKER_LOGGER = logging.getLogger(f"worker-{WORKER_ID}")
 
 
 @click.command()
 @click.option("--fd")
-@click.option("--log-file")
 @OPT_LOGLEVEL
-def start_worker(log_file, log_level, fd):
-    """Start worker"""
+def start_worker(log_level, fd):
+    """Start a worker"""
     WORKER_LOGGER.setLevel(getattr(logging, log_level.upper()))
-    WORKER_LOGGER.info("Started worker")
+    WORKER_LOGGER.info("Started")
 
-    # by default this is None, and raises on exception on OSX,
-    # socket.error: [Errno 35] Resource temporarily unavailable
-    # there is probably a better way to do this
-    socket.setdefaulttimeout(100000000)
+    sock = get_socket_from_fd(int(fd))
+    conn = socket.socket(family=SOCKET_FAMILY, type=SOCKET_TYPE)
+    conn.connect(sock.getsockname())
+    WORKER_LOGGER.info("Connected to server: %s", sock.getsockname())
 
-    WORKER_LOGGER.info("Connecting to file descriptor: %s", fd)
-    sock = socket.fromfd(fd=int(fd), family=socket.AF_INET, type=socket.SOCK_STREAM)
-    WORKER_LOGGER.info("Listening to socket: %s", sock.getsockname())
+    # start thread for sending heartbeat
+    thread = threading.Thread(target=send_heatbeat, args=(conn,))
+    thread.start()
 
-    # start watching the socket, dealing with one request at a time
     while True:
-        conn, _ = sock.accept()
-        request = conn.recv(1024)
-        WORKER_LOGGER.info(str(request))
-        # do something ....
-        if WORKER_ID in request.decode("utf8"):
-            WORKER_LOGGER.info("thats me!")
-            conn.sendall(bytes(f"hallo from {WORKER_ID}", "utf-8"))
-        conn.close()
+        # WORKER_LOGGER.info("[SERVER] %s", worker.recv(2048).decode(FORMAT))
+        pass
+
+
+def send_heatbeat(conn: socket.socket):
+    """Send heatbeat to server."""
+    while True:
+        time.sleep((HEARTBEAT_TIMEOUT_MS / 1000) * 0.5)
+        conn.send(b"heartbeat")

@@ -32,3 +32,4 @@ In detail:
 - Use IPC sockets (over TCP)
 - Use circus plugins like: https://circus.readthedocs.io/en/latest/for-ops/using-plugins/#flapping
 - Also think about where Process checkpoint lives
+- bi-directional heartbeat

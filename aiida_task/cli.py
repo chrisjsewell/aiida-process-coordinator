@@ -22,10 +22,12 @@ from circus.util import (
 from click import argument, option
 
 from . import __version__
+from .shared import SOCKET_FAMILY, SOCKET_TYPE
 
 CIRCUS_PID_FILE = "circus.pid"
 CIRCUS_LOG_FILE = "circus.log"
 WATCHER_WORKER_NAME = "aiida-workers"
+WATCHER_SERVER_NAME = "aiida-server"
 
 
 @click.group("main")
@@ -80,13 +82,15 @@ def circus_start(number, workdir, log_level, foreground):
         )
 
     worker_name = WATCHER_WORKER_NAME
+    server_name = WATCHER_SERVER_NAME
 
     # set physical file locations
     workdir = os.path.abspath(workdir)
     os.makedirs(workdir, exist_ok=True)
     pidfile = os.path.join(workdir, CIRCUS_PID_FILE)
     logfile_circus = os.path.join(workdir, CIRCUS_LOG_FILE)
-    logfile_worker = os.path.join(workdir, f"worker-{worker_name}.log")
+    logfile_worker = os.path.join(workdir, f"watcher-{worker_name}.log")
+    logfile_server = os.path.join(workdir, f"watcher-{server_name}.log")
 
     if os.path.exists(pidfile):
         raise click.ClickException(f"PID file already exists: {pidfile}")
@@ -105,7 +109,27 @@ def circus_start(number, workdir, log_level, foreground):
         "watchers": [
             {
                 "cmd": (
-                    f"aiida-worker  --log-file {logfile_worker} --log-level {log_level}"
+                    f"aiida-server --log-level {log_level}"
+                    " --fd $(circus.sockets.messaging)"
+                ),
+                "name": server_name,
+                "singleton": True,
+                "virtualenv": os.environ.get("VIRTUAL_ENV", None),
+                "copy_env": True,
+                "env": get_env(),
+                "use_sockets": True,
+                "stdout_stream": {
+                    "class": "FileStream",
+                    "filename": logfile_server,
+                },
+                "stderr_stream": {
+                    "class": "FileStream",
+                    "filename": logfile_server,
+                },
+            },
+            {
+                "cmd": (
+                    f"aiida-worker --log-level {log_level}"
                     " --fd $(circus.sockets.messaging)"
                 ),
                 "name": worker_name,
@@ -122,7 +146,7 @@ def circus_start(number, workdir, log_level, foreground):
                     "class": "FileStream",
                     "filename": logfile_worker,
                 },
-            }
+            },
         ],
     }
 
@@ -131,7 +155,14 @@ def circus_start(number, workdir, log_level, foreground):
 
     # important: sockets have to be created, after daemonizing
     arbiter_config["sockets"] = [
-        CircusSocket(name="messaging", host=socket.gethostname(), port=32007)
+        CircusSocket(
+            name="messaging",
+            host=socket.gethostbyname(socket.gethostname()),
+            port=0,  # pick an available port
+            family=SOCKET_FAMILY,
+            type=SOCKET_TYPE,
+            blocking=False,
+        )
     ]
 
     arbiter = get_arbiter(**arbiter_config)
