@@ -1,5 +1,6 @@
 import os
 import shutil
+import socket
 import sys
 from typing import Optional
 
@@ -10,6 +11,7 @@ from circus import logger as circus_logger
 from circus.circusd import daemonize
 from circus.client import CircusClient
 from circus.pidfile import Pidfile
+from circus.sockets import CircusSocket
 from circus.util import (
     DEFAULT_ENDPOINT_DEALER,
     DEFAULT_ENDPOINT_STATS,
@@ -56,6 +58,7 @@ OPT_WORKDIR = option(
     help="Directory to store files",
 )
 OPT_LOGLEVEL = option(
+    "-l",
     "--log-level",
     default="info",
     show_default=True,
@@ -68,8 +71,14 @@ OPT_LOGLEVEL = option(
 @argument("number", required=False, type=int, default=1)
 @OPT_WORKDIR
 @OPT_LOGLEVEL
-def circus_start(number, workdir, log_level):
+@option("--foreground", is_flag=True, help="Run in foreground")
+def circus_start(number, workdir, log_level, foreground):
     """Start daemon"""
+    if foreground and number > 1:
+        raise click.ClickException(
+            "can only run a single worker when running in the foreground"
+        )
+
     worker_name = WATCHER_WORKER_NAME
 
     # set physical file locations
@@ -80,14 +89,14 @@ def circus_start(number, workdir, log_level):
     logfile_worker = os.path.join(workdir, f"worker-{worker_name}.log")
 
     if os.path.exists(pidfile):
-        raise SystemExit(f"PID file already exists: {pidfile}")
+        raise click.ClickException(f"PID file already exists: {pidfile}")
 
     # see circus.arbiter.Arbiter for inputs
     arbiter_config = {
         "controller": DEFAULT_ENDPOINT_DEALER,
         "pubsub_endpoint": DEFAULT_ENDPOINT_SUB,
         "stats_endpoint": DEFAULT_ENDPOINT_STATS,
-        "logoutput": logfile_circus,
+        "logoutput": "-" if foreground else logfile_circus,
         "loglevel": log_level.upper(),
         "debug": False,
         "statsd": True,
@@ -95,12 +104,16 @@ def circus_start(number, workdir, log_level):
         # see circus.watchers.Watcher for inputs
         "watchers": [
             {
-                "cmd": f"aiida-worker  --log-file {logfile_worker} --log-level {log_level}",
+                "cmd": (
+                    f"aiida-worker  --log-file {logfile_worker} --log-level {log_level}"
+                    " --fd $(circus.sockets.messaging)"
+                ),
                 "name": worker_name,
                 "numprocesses": number,
                 "virtualenv": os.environ.get("VIRTUAL_ENV", None),
                 "copy_env": True,
                 "env": get_env(),
+                "use_sockets": True,
                 "stdout_stream": {
                     "class": "FileStream",
                     "filename": logfile_worker,
@@ -113,7 +126,13 @@ def circus_start(number, workdir, log_level):
         ],
     }
 
-    daemonize()
+    if not foreground:
+        daemonize()
+
+    # important: sockets have to be created, after daemonizing
+    arbiter_config["sockets"] = [
+        CircusSocket(name="messaging", host=socket.gethostname(), port=32007)
+    ]
 
     arbiter = get_arbiter(**arbiter_config)
     pidfile = Pidfile(arbiter.pidfile)
