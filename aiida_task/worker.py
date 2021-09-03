@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 import click
 
-from .cli import OPT_LOGLEVEL
+from .cli.daemon import OPT_LOGLEVEL
 from .shared import (
     ENCODING,
     HEADER_LEN,
@@ -66,7 +66,7 @@ def send_heatbeat(conn: socket.socket):
     while True:
         time.sleep((HEARTBEAT_TIMEOUT_MS / 1000) * 0.5)
         # this should except if the server is no longer available
-        # may be also receive from server?
+        # maybe also receive from server?
         try:
             conn.send(HEARTBEAT_HEADER)
         except BrokenPipeError:

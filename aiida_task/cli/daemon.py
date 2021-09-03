@@ -21,19 +21,14 @@ from circus.util import (
 )
 from click import argument, option
 
-from . import __version__
-from .shared import SOCKET_FAMILY, SOCKET_TYPE
+from aiida_task.shared import SOCKET_FAMILY, SOCKET_TYPE
+
+from .main import main
 
 CIRCUS_PID_FILE = "circus.pid"
 CIRCUS_LOG_FILE = "circus.log"
 WATCHER_WORKER_NAME = "aiida-workers"
 WATCHER_SERVER_NAME = "aiida-server"
-
-
-@click.group("main")
-@click.version_option(__version__)
-def main(context_settings={"help_option_names": ("--help",)}):  # noqa: B006
-    pass
 
 
 def get_env():
@@ -69,7 +64,12 @@ OPT_LOGLEVEL = option(
 )
 
 
-@main.command("start")
+@main.group("daemon")
+def daemon():
+    """Manage the daemon"""
+
+
+@daemon.command("start")
 @argument("number", required=False, type=int, default=1)
 @OPT_WORKDIR
 @OPT_LOGLEVEL
@@ -202,7 +202,7 @@ def circus_start(number, workdir, log_level, foreground):
                 pidfile.unlink()
 
 
-@main.command("stop")
+@daemon.command("stop")
 @OPT_WORKDIR
 @option("--clear", is_flag=True, help="Clear the workdir")
 def circus_stop(workdir, clear):
@@ -211,20 +211,29 @@ def circus_stop(workdir, clear):
     result = client.call({"command": "quit", "properties": {"waiting": True}})
     click.echo(yaml.dump(result))
     if clear:
-        shutil.rmtree(workdir)
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
-@main.command("status")
-@argument("watcher", default=WATCHER_WORKER_NAME)
+@daemon.command("status")
+@option(
+    "-w",
+    "--watcher",
+    show_default=True,
+    default="all",
+    type=click.Choice(("all", WATCHER_WORKER_NAME, WATCHER_SERVER_NAME)),
+)
 @OPT_WORKDIR
 def circus_status(watcher, workdir):
-    """Daemon status"""
+    """Get process status"""
     client = get_circus_client(workdir=workdir)
-    result = client.call({"command": "stats", "properties": {"name": watcher}})
+    if watcher == "all":
+        result = client.call({"command": "stats"})
+    else:
+        result = client.call({"command": "stats", "properties": {"name": watcher}})
     click.echo(yaml.dump(result))
 
 
-@main.command("incr")
+@daemon.command("incr")
 @argument("number", required=False, type=int, default=1)
 @OPT_WORKDIR
 def circus_incr(number, workdir):
@@ -236,11 +245,11 @@ def circus_incr(number, workdir):
     click.echo(yaml.dump(result))
 
 
-@main.command("decr")
+@daemon.command("decr")
 @argument("number", required=False, type=int, default=1)
 @OPT_WORKDIR
 def circus_decr(number, workdir):
-    """Increase workers"""
+    """Decrease workers"""
     client = get_circus_client(workdir=workdir)
     result = client.call(
         {"command": "decr", "properties": {"name": WATCHER_WORKER_NAME, "nb": number}}

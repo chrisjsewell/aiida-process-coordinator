@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 import click
 
-from .cli import OPT_LOGLEVEL
+from .cli.daemon import OPT_LOGLEVEL
 from .shared import (
     DISCONNECT_HEADER,
     ENCODING,

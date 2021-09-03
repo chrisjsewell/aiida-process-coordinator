@@ -1,4 +1,4 @@
-# aiida-task-controller
+# aiida-task-coordinator
 
 A proof of principle for a non-RabbitMQ `Process` task control solution.
 
