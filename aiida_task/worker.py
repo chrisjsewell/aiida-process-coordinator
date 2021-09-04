@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import select
@@ -5,6 +6,7 @@ import socket
 import threading
 import time
 import uuid
+from typing import List
 
 import click
 from sqlalchemy.sql.expression import update
@@ -45,37 +47,12 @@ def start_worker(log_level, fd, db_path):
     send_data(conn, "connection", dict(WORKER_ID))
 
     # start thread for sending heartbeat
-    thread = threading.Thread(target=send_heatbeat, args=(conn,))
+    thread = threading.Thread(target=send_heatbeat, args=(conn,), daemon=True)
     thread.start()
 
-    poller = select.poll()
-    poller.register(conn, select.POLLIN)
+    asyncio.run(watch_for_messages(conn, thread, db_path))
 
-    # stop the process if the heartbeat thread dies
-    while thread.is_alive():
-        events = poller.poll(HEARTBEAT_TIMEOUT_MS)
-        if not events:
-            continue
-        # expect to receive a message from the server to start a new task or action
-        try:
-            message = receive_data(conn)
-        except ConnectionResetError:
-            break
-        if not message:
-            continue
-        if message.get("type") == "submit":
-            node_id = message["data"]["node"]
-            WORKER_LOGGER.info(f"[SUBMIT] process {node_id}")
-            time.sleep(10)
-            session = get_session(db_path)
-            with session:
-                session.execute(
-                    update(Node).where(Node.id == node_id).values(status="finished")
-                )
-                session.commit()
-            WORKER_LOGGER.info(f"[FINISH] process {node_id}")
-
-    WORKER_LOGGER.info("[HALTING] Lost connection to server")
+    WORKER_LOGGER.info("[HALTING] Closing worker")
 
 
 def send_heatbeat(conn: socket.socket):
@@ -88,3 +65,46 @@ def send_heatbeat(conn: socket.socket):
             conn.send(HEARTBEAT_HEADER)
         except BrokenPipeError:
             break
+
+
+async def watch_for_messages(
+    conn: socket.socket, thread: threading.Thread, db_path: str
+):
+    """Watch for messages from the server."""
+    processes: List[asyncio.Task] = []
+    poller = select.poll()
+    poller.register(conn, select.POLLIN)
+
+    while thread.is_alive():
+        await asyncio.sleep(0)  # relinquish control to other tasks
+        events = poller.poll(HEARTBEAT_TIMEOUT_MS)
+        if not events:
+            continue
+        try:
+            message = receive_data(conn)
+        except ConnectionResetError:
+            break
+        if not message:
+            continue
+        if message.get("type") == "submit":
+            node_id = message["data"]["node"]
+            processes.append(asyncio.create_task(run_process(db_path, node_id)))
+
+    WORKER_LOGGER.info("[HALTING] Lost server connection, cancelling processes")
+
+    for process in processes:
+        process.cancel()
+    # TODO wait for them to finalise cancellation
+
+
+async def run_process(db_path, node_id):
+    """Run a process to termination."""
+    WORKER_LOGGER.info(f"[SUBMIT] process {node_id}")
+    await asyncio.sleep(60)
+    session = get_session(db_path)
+    with session:
+        session.execute(
+            update(Node).where(Node.id == node_id).values(status="finished")
+        )
+        session.commit()
+    WORKER_LOGGER.info(f"[FINISH] process {node_id}")

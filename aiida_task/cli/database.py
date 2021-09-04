@@ -1,6 +1,7 @@
 import click
 import yaml
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 from aiida_task.database import ActiveProcesses, Node
 
@@ -44,10 +45,14 @@ def submit(db: DatabaseContext, number: int):
     """Create and submit a process"""
     with db as session:
         for _ in range(number):
-            node = Node()
-            session.add(node)
-            session.commit()
-            proc = ActiveProcesses(dbnode_id=node.id)
-            session.add(proc)
-            session.commit()
-            click.echo(f"Node {node.id} submitted as process {proc.id}")
+            try:
+                node = Node()
+                session.add(node)
+                session.commit()
+                proc = ActiveProcesses(dbnode_id=node.id)
+                session.add(proc)
+                session.commit()
+                click.echo(f"Node {node.id} submitted as process {proc.id}")
+            except OperationalError:
+                click.echo("Database locked, skipping!")
+                session.rollback()

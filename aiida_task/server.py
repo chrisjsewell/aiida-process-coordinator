@@ -121,6 +121,7 @@ def db_connection(db_path):
                     session.commit()
                 except OperationalError:
                     # for sqlite only, database could be locked by worker writing
+                    session.rollback()
                     continue
 
                 # get the number of processes being run by each worker,
@@ -141,7 +142,7 @@ def db_connection(db_path):
                             session.commit()
                         except OperationalError:
                             # for sqlite only, database could be locked by worker writing
-                            pass
+                            session.rollback()
                         continue
 
                     # if the process has not been submitted, submit it
@@ -152,7 +153,8 @@ def db_connection(db_path):
                         )[0]
                         if nprocs < MAX_PROCS_PER_WORKER:
                             SERVER_LOGGER.info(
-                                f"[DB] Submitting process {process.id} to worker PID {pid}"
+                                f"[DB] Submitting process {process.id} (node {process.dbnode_id}) "
+                                f"to worker PID {pid}"
                             )
 
                             try:
@@ -162,6 +164,7 @@ def db_connection(db_path):
                                 session.commit()
                             except OperationalError:
                                 # for sqlite only, database could be locked by worker writing
+                                session.rollback()
                                 continue
 
                             try:

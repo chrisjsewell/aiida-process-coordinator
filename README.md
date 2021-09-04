@@ -33,3 +33,6 @@ In detail:
 - Use circus plugins like: https://circus.readthedocs.io/en/latest/for-ops/using-plugins/#flapping
 - Also think about where Process checkpoint lives
 - bi-directional heartbeat
+- higher-level APIs?
+  - https://docs.python.org/3/library/socketserver.html#module-socketserver
+  - https://docs.python.org/3/library/asyncio-stream.html
