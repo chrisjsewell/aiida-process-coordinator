@@ -173,6 +173,8 @@ def db_connection(db_path):
                                         "node": process.dbnode_id,
                                     },
                                 )
+                                # TODO how to make an RPC call here, to get a response?
+                                # currently the heartbeat thread would intercept it
                             except Exception:
                                 SERVER_LOGGER.error(
                                     f"[DB] Error submitting process {process.id} to worker PID {pid}",
