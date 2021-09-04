@@ -23,7 +23,7 @@ from click import argument, option
 
 from aiida_task.shared import SOCKET_FAMILY, SOCKET_TYPE
 
-from .main import main
+from .main import DatabaseContext, main, pass_db
 
 CIRCUS_PID_FILE = "circus.pid"
 CIRCUS_LOG_FILE = "circus.log"
@@ -73,13 +73,16 @@ def daemon():
 @argument("number", required=False, type=int, default=1)
 @OPT_WORKDIR
 @OPT_LOGLEVEL
+@pass_db
 @option("--foreground", is_flag=True, help="Run in foreground")
-def circus_start(number, workdir, log_level, foreground):
+def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
     """Start daemon"""
     if foreground and number > 1:
         raise click.ClickException(
             "can only run a single worker when running in the foreground"
         )
+
+    db.ensure_exists()
 
     worker_name = WATCHER_WORKER_NAME
     server_name = WATCHER_SERVER_NAME
@@ -111,6 +114,7 @@ def circus_start(number, workdir, log_level, foreground):
                 "cmd": (
                     f"aiida-server --log-level {log_level}"
                     " --fd $(circus.sockets.messaging)"
+                    f" --db-path {db.path}"
                 ),
                 "name": server_name,
                 "singleton": True,
@@ -131,6 +135,7 @@ def circus_start(number, workdir, log_level, foreground):
                 "cmd": (
                     f"aiida-worker --log-level {log_level}"
                     " --fd $(circus.sockets.messaging)"
+                    f" --db-path {db.path}"
                 ),
                 "name": worker_name,
                 "numprocesses": number,
@@ -205,13 +210,17 @@ def circus_start(number, workdir, log_level, foreground):
 @daemon.command("stop")
 @OPT_WORKDIR
 @option("--clear", is_flag=True, help="Clear the workdir")
-def circus_stop(workdir, clear):
+@pass_db
+def circus_stop(db, workdir, clear):
     """Stop daemon"""
     client = get_circus_client(workdir=workdir)
     result = client.call({"command": "quit", "properties": {"waiting": True}})
     click.echo(yaml.dump(result))
     if clear:
         shutil.rmtree(workdir, ignore_errors=True)
+    # ensure database is cleaned up
+    with db as session:
+        session.commit()
 
 
 @daemon.command("status")
