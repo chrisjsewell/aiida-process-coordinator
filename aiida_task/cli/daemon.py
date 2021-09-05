@@ -28,7 +28,7 @@ from .main import DatabaseContext, main, pass_db
 CIRCUS_PID_FILE = "circus.pid"
 CIRCUS_LOG_FILE = "circus.log"
 WATCHER_WORKER_NAME = "aiida-workers"
-WATCHER_SERVER_NAME = "aiida-server"
+WATCHER_COORDINATOR_NAME = "aiida-coordinator"
 
 
 def get_env():
@@ -85,7 +85,7 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
     db.ensure_exists()
 
     worker_name = WATCHER_WORKER_NAME
-    server_name = WATCHER_SERVER_NAME
+    coordinator_name = WATCHER_COORDINATOR_NAME
 
     # set physical file locations
     workdir = os.path.abspath(workdir)
@@ -93,7 +93,7 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
     pidfile = os.path.join(workdir, CIRCUS_PID_FILE)
     logfile_circus = os.path.join(workdir, CIRCUS_LOG_FILE)
     logfile_worker = os.path.join(workdir, f"watcher-{worker_name}.log")
-    logfile_server = os.path.join(workdir, f"watcher-{server_name}.log")
+    logfile_coordinator = os.path.join(workdir, f"watcher-{coordinator_name}.log")
 
     if os.path.exists(pidfile):
         raise click.ClickException(f"PID file already exists: {pidfile}")
@@ -112,11 +112,11 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
         "watchers": [
             {
                 "cmd": (
-                    f"aiida-server --log-level {log_level}"
+                    f"aiida-coordinator --log-level {log_level}"
                     " --fd $(circus.sockets.messaging)"
                     f" --db-path {db.path}"
                 ),
-                "name": server_name,
+                "name": coordinator_name,
                 "singleton": True,
                 "virtualenv": os.environ.get("VIRTUAL_ENV", None),
                 "copy_env": True,
@@ -124,11 +124,11 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
                 "use_sockets": True,
                 "stdout_stream": {
                     "class": "FileStream",
-                    "filename": logfile_server,
+                    "filename": logfile_coordinator,
                 },
                 "stderr_stream": {
                     "class": "FileStream",
-                    "filename": logfile_server,
+                    "filename": logfile_coordinator,
                 },
             },
             {
@@ -229,7 +229,7 @@ def circus_stop(db, workdir, clear):
     "--watcher",
     show_default=True,
     default="all",
-    type=click.Choice(("all", WATCHER_WORKER_NAME, WATCHER_SERVER_NAME)),
+    type=click.Choice(("all", WATCHER_WORKER_NAME, WATCHER_COORDINATOR_NAME)),
 )
 @OPT_WORKDIR
 def circus_status(watcher, workdir):

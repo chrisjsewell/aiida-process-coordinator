@@ -33,6 +33,7 @@ repos:
       - mdformat-gfm
       - mdformat-black
       files: (?x)^(README\.md|CHANGELOG\.md)$
+      args: [--number]
 
   - repo: https://github.com/pycqa/isort
     rev: 5.9.3
