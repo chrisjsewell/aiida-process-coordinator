@@ -17,6 +17,8 @@ from sqlalchemy.sql.expression import text
 
 Base = declarative_base()
 
+TERMINATED_STATES = ("finished", "excepted")
+
 
 class Node(Base):
     """Mock implementation of the node."""
@@ -29,7 +31,7 @@ class Node(Base):
 
     @property
     def is_terminated(self):
-        return self.status in ("finished", "excepted")
+        return self.status in TERMINATED_STATES
 
 
 class ActiveProcesses(Base):

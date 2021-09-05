@@ -3,7 +3,12 @@
 A prototype for a non-RabbitMQ `Process` execution coordinator.
 
 The solution builds on aiida-core's existing database and daemon management infrastructure,
-with no additional dependencies.
+with no additional dependencies:
+
+- Removes a barrier to user adoption (RabbitMQ installation)
+- Eliminate "unreachable processes"
+- Improved load balancing
+- Improved introspection
 
 ## Terminology
 
@@ -70,6 +75,8 @@ As shown below, the proposed solution essentially replaces the RabbitMQ server w
 ## The proposal by example
 
 This package implements a mock AiiDA database with sqlite (created on demand), mock processes which wait for 60 seconds, and exposes a CLI.
+**NOTE**: sqlite does not handle read/write concurrency as well as PostgreSQL, so it is possible to encounter some database locking failures in this prototype (most are accounted for).
+
 It is recommended to run the CLI via [tox](https://tox.readthedocs.io/en/latest/), to auto-create an isolated Python environment.
 
 First we submit a number of process to the database:
@@ -180,9 +187,39 @@ INFO:worker-501-25754:[FINISH] process 8
 INFO:worker-501-25754:[FINISH] process 10
 ```
 
+You can play around with increasing/decreasing the number of workers and submitting additional processes while the daemon is running:
+
+```console
+$ tox daemon incr
+$ tox daemon decr
+$ tox daemon status
+```
+
+You can easily introspect the status of running processes with e.g.:
+
+```console
+$ tox database submit 1000
+$ tox daemon start 3
+$ tox database status
+Process nodes: 1000
+Non-terminated nodes: 600
+Active processes: 600
+Worker loads (PID -> count/max):
+  32887: 200 / 200
+  32888: 200 / 200
+  32962: 200 / 200
+```
+
+To stop the daemon and remove the work directory:
+
+```console
+$ tox daemon stop -- --clear
+```
+
 ## TODO
 
 - Implement handling of actions
+- Simple CLI command, to ensure node and process table are in-sync (i.e. no non-terminated nodes not in process table)
 - Use IPC sockets (over TCP)
 - Use circus plugins like: https://circus.readthedocs.io/en/latest/for-ops/using-plugins/#flapping
 - Also think about where Process checkpoint lives

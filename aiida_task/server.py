@@ -183,6 +183,8 @@ def db_connection(db_path):
                                     f"[DB] Error submitting process {process.id} to worker PID {pid}",
                                     exc_info=True,
                                 )
+                            # TODO maybe ideally save to database once process is successfully sent to worker
+                            # but what if database save fails (mainly an sqlite issue)
                             # else:
                             #     process.worker_pid = pid
                             #     process.worker_uuid = ACTIVE_WORKERS[pid]["uuid"]
@@ -231,10 +233,17 @@ def worker_connection(conn: socket.socket, addr):
             if not events:
                 raise Disconnect("Missed heartbeat")
             header = conn.recv(HEADER_LEN)
+            if not header:
+                # TODO this was not required before,
+                # the worker seems to be emitting empty messages after being killed by the daemon
+                # maybe the connection is not being closed properly?
+                raise Disconnect("null message")
             if header == HEARTBEAT_HEADER:
                 SERVER_LOGGER.debug(f"[HEARTBEAT] {addr}")
             elif header == DISCONNECT_HEADER:
                 raise Disconnect("Worker disconnected")
+            else:
+                SERVER_LOGGER.debug(f"[UNKNOWN MESSAGE] {addr}: {header}")
 
     except ConnectionResetError as exc:
         SERVER_LOGGER.info(f"[DISCONNECTED] {addr}: {exc}")
