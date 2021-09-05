@@ -57,7 +57,9 @@ This current design has a number of shortcomings:
 - RabbitMQ must be running before any `Process` can be submitted, or actions taken (pause/play/kill)
 - This essentially introduces two independent sources where the state of the `Process` is persisted: in the database and in the RabbitMQ server
   - This can lead to "de-syncing" of the sources; if the worker-RabbitMQ connection is lost (leading to RabbitMQ tasking a worker to execute an already running task [aiida-core#4598](https://github.com/aiidateam/aiida-core/issues/4598)), or if the task is lost (leading to `Process`s being left in an un-terminated state [aiida-core#1712](https://github.com/aiidateam/aiida-core/issues/1712))
-- The discussion in [rabbitmq-server#3345](https://github.com/rabbitmq/rabbitmq-server/discussions/3345) highlights that really AiiDA uses RabbitMQ in a manner it is not intended to be used; normal use is to acknowledge a message as soon as it is received (within microseconds), whereas AiiDA only acknowledges a message once the process has completed running, which can take many hours.
+- The discussion in [rabbitmq-server#3345](https://github.com/rabbitmq/rabbitmq-server/discussions/3345) highlights that AiiDA uses RabbitMQ in a manner it is not intended to be used;
+  normal use is to acknowledge a message as soon as it is received (within microseconds),
+  whereas AiiDA only acknowledges a message once the process has completed running, which can take many hours.
 - To my knowledge, there is no easy way for the user to introspect RabbitMQ; to find out what tasks are outstanding or running.
 - It is not easy to backup/move an AiiDA profile with unfinished processes, as this would require also require moving the RabbitMQ's persistent data.
 
