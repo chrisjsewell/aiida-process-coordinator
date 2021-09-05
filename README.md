@@ -9,6 +9,8 @@ with no additional dependencies:
 - Eliminate "unreachable processes"
 - Improved load balancing
 - Improved introspection
+- Removes 13 of the 76 aiida-core package primary dependencies
+  (kiwipy, aio-pika, aiormq, async-generator, idna, multidict, deprecation, packaging, pamqp, pyparsing, pytray, shortuuid, yarl)
 
 ## Terminology
 
@@ -62,6 +64,7 @@ This current design has a number of shortcomings:
   whereas AiiDA only acknowledges a message once the process has completed running, which can take many hours.
 - To my knowledge, there is no easy way for the user to introspect RabbitMQ; to find out what tasks are outstanding or running.
 - It is not easy to backup/move an AiiDA profile with unfinished processes, as this would require also require moving the RabbitMQ's persistent data.
+- The Python interface to RabbitMQ goes through multiple layers of abstraction (kiwipy -> aio_pika -> aiormq), making it difficult to debug and maintain.
 
 ## Proposed solution
 
