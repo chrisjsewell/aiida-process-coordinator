@@ -113,7 +113,7 @@ def process_list_active(db: DatabaseContext, last: int):
 
 
 @process.command("submit")
-@click.argument("number", type=int)
+@click.argument("number", type=int, default=1)
 @pass_db
 def submit(db: DatabaseContext, number: int):
     """Create and submit a process"""

@@ -72,7 +72,22 @@ async def main(
     # pid -> connection details
     workers: Dict[int, WorkerConnection] = {}
 
-    async def accept_connection(reader: StreamReader, writer: StreamWriter):
+    # Start the server
+    worker_sock = get_socket_from_fd(socket_fd)
+    worker_server = await asyncio.start_server(
+        create_worker_connect_cb(network_uuid, workers), sock=worker_sock
+    )
+    SERVER_LOGGER.info("[SERVING] on %s", worker_sock.getsockname())
+
+    async with worker_server:
+        # start polling the database
+        await coordinate_processes(circus_endpoint, db_path, workers)
+
+    SERVER_LOGGER.info("[STOPPED]")
+
+
+def create_worker_connect_cb(network_uuid: str, workers: Dict[int, WorkerConnection]):
+    async def _accept_connection(reader: StreamReader, writer: StreamWriter):
         """On a new connection, we perform a handshake with the worker, then store it for later communication"""
         addr = writer.get_extra_info("peername")
         SERVER_LOGGER.info("[NEW CONNECTION] %s", addr)
@@ -105,16 +120,7 @@ async def main(
         )
         SERVER_LOGGER.info(f"[STORED CONNECTIONS] {len(workers)}")
 
-    # Start the server
-    sock = get_socket_from_fd(socket_fd)
-    server = await asyncio.start_server(accept_connection, sock=sock)
-    SERVER_LOGGER.info("[SERVING] on %s", sock.getsockname())
-
-    async with server:
-        # start polling the database
-        await coordinate_processes(circus_endpoint, db_path, workers)
-
-    SERVER_LOGGER.info("[STOPPED]")
+    return _accept_connection
 
 
 async def coordinate_processes(
