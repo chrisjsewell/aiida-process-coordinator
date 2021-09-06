@@ -6,9 +6,9 @@ The solution builds on aiida-core's existing database and daemon management infr
 with no additional dependencies:
 
 - Removes a barrier to user adoption (RabbitMQ installation)
-- Eliminate "unreachable processes"
-- Improved load balancing
-- Improved introspection
+- Eliminates "unreachable processes"
+- Adds load balancing of processes across workers
+- Improved introspection of scheduled processes
 - Removes 13 of the 76 aiida-core package primary dependencies
   (kiwipy, aio-pika, aiormq, async-generator, idna, multidict, deprecation, packaging, pamqp, pyparsing, pytray, shortuuid, yarl)
 
@@ -24,8 +24,8 @@ These are the major requirements for the coordinator:
 
 - Ensure every submitted AiiDA `Process` is run to termination
 - Ensure each AiiDA `Process` is only being executed by one worker at any time
-- Handle nested submissions, i.e. Processes that submit sub-Processes, and must wait on their completion before continuing
 - Handle pause/play and kill requests for Processes
+- Handle nested submissions, i.e. Processes that submit sub-Processes, and must wait on their completion before continuing
 
 ## Why replace RabbitMQ?
 
@@ -68,11 +68,16 @@ This current design has a number of shortcomings:
 
 ## Proposed solution
 
-As shown below, the proposed solution essentially replaces the RabbitMQ server with a (singleton) `Process` execution coordinator, spawned by the AiiDA daemon, which reads from persisted data in the database.
+As shown below, the proposed solution essentially replaces the RabbitMQ server with a (singleton) `Process` execution coordinator, spawned by the AiiDA daemon.
+This coordinator acts on persisted data in the database, to coordinate execution of `Process`s on workers.
 
 <img src="./images/new-sysml.svg" style="height: 350px;" />
 
-- The solution currently only uses existing AiiDA Python dependencies (sqlalchemy and circus)
+The coordinator and workers form a standard server/client private network, with the coordinator acting as the server and the workers acting as the clients.
+The built-in Python [asyncio.streams](https://docs.python.org/3/library/asyncio-stream.html) primitives are used to implement the connections,
+and messaging follows a simple JSON protocol.
+
+- The solution only uses existing AiiDA Python dependencies (primarily circus)
 - The persistence for executing processes is all situated in the database
   - Introspection/manipulation of this data can be easily implemented with standard database queries
   - The user can submit a process or set an action (pause/play/kill) on a process, with only a connection to the database
@@ -80,134 +85,200 @@ As shown below, the proposed solution essentially replaces the RabbitMQ server w
 
 ## The proposal by example
 
-This package implements a mock AiiDA database with sqlite (created on demand), mock processes which wait for 60 seconds, and exposes a CLI.
+This package implements a mock AiiDA database with sqlite (created on demand), mock processes which wait for 60 seconds, and exposes a CLI mimicking aspects of verdi.
+
 **NOTE**: sqlite does not handle read/write concurrency as well as PostgreSQL, so it is possible to encounter some database locking failures in this prototype (most are accounted for).
 
-It is recommended to run the CLI via [tox](https://tox.readthedocs.io/en/latest/), to auto-create an isolated Python environment.
+It is recommended to run the CLI via [tox](https://tox.readthedocs.io/en/latest/), to auto-create an isolated Python environment
+(note you must add a `--` before CLI arguments).
 
-First we submit a number of process to the database:
+To see all the commands:
 
 ```console
-$ tox database submit 10
-$ tox database status
+$ tox -- --help
+Usage: aiida-task [OPTIONS] COMMAND [ARGS]...
+
+Options:
+  --version            Show the version and exit.
+  -d, --database TEXT  Path to database (or set env AIIDADB)  [default:
+                       /Users/chrisjsewell/Documents/GitHub/aiida-task-
+                       controller/aiida.sqlite3]
+
+  --help               Show this message and exit.
+
+Commands:
+  daemon   Manage the daemon
+  process  Manage processes
+```
+
+First (before starting the daemon) we submit a number of process to the database:
+
+```console
+$ tox process submit 5
+Node pk 1 submitted
+Node pk 2 submitted
+Node pk 3 submitted
+Node pk 4 submitted
+Node pk 5 submitted
 ```
 
 This will generate an `aiida.sqlite3` file in the current directory.
-If we inspect the database (for example using [vscode-sqlite](https://marketplace.visualstudio.com/items?itemName=alexcvzz.vscode-sqlite)), the standard node table (`db_dbnode`) is populated:
 
-<table><tr><th>id</th><th>mtime</th><th>status</th><tr><tr><td>1</td><td>2021-09-05 01:58:12.899992</td><td>created</td></tr><tr><td>2</td><td>2021-09-05 01:58:12.913475</td><td>created</td></tr><tr><td>3</td><td>2021-09-05 01:58:12.923336</td><td>created</td></tr><tr><td>4</td><td>2021-09-05 01:58:12.933164</td><td>created</td></tr><tr><td>5</td><td>2021-09-05 01:58:12.942143</td><td>created</td></tr><tr><td>6</td><td>2021-09-05 01:58:12.953719</td><td>created</td></tr><tr><td>7</td><td>2021-09-05 01:58:12.964585</td><td>created</td></tr><tr><td>8</td><td>2021-09-05 01:58:12.979336</td><td>created</td></tr><tr><td>9</td><td>2021-09-05 01:58:12.991934</td><td>created</td></tr><tr><td>10</td><td>2021-09-05 01:58:13.002071</td><td>created</td></tr></table>
+We can list the process nodes (from `db_dbnode`) in the standard manner:
 
-Then, there is also a `db_dbprocess` table, with outstanding processes to execute:
+```console
+$ tox process list
+  PK  Modified                    Status
+----  --------------------------  --------
+   5  2021-09-06 12:39:34.407908  created
+   4  2021-09-06 12:39:34.402800  created
+   3  2021-09-06 12:39:34.397937  created
+   2  2021-09-06 12:39:34.393634  created
+   1  2021-09-06 12:39:34.386709  created
+```
 
-<table><tr><th>id</th><th>mtime</th><th>dbnode_id</th><th>action</th><th>worker_pid</th><th>worker_uuid</th><tr><tr><td>1</td><td>2021-09-05 01:58:12.906869</td><td>1</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>2</td><td>2021-09-05 01:58:12.917708</td><td>2</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>3</td><td>2021-09-05 01:58:12.928120</td><td>3</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>4</td><td>2021-09-05 01:58:12.937583</td><td>4</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>5</td><td>2021-09-05 01:58:12.946685</td><td>5</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>6</td><td>2021-09-05 01:58:12.958601</td><td>6</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>7</td><td>2021-09-05 01:58:12.972674</td><td>7</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>8</td><td>2021-09-05 01:58:12.985928</td><td>8</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>9</td><td>2021-09-05 01:58:12.996245</td><td>9</td><td>NULL</td><td>NULL</td><td>NULL</td></tr><tr><td>10</td><td>2021-09-05 01:58:13.010583</td><td>10</td><td>NULL</td><td>NULL</td><td>NULL</td></tr></table>
+But now there is also a `db_process` table we can inspect with the scheduled processes to execute:
+
+```console
+$ tox process scheduled
+  PK  Modified                    Action    Worker PID
+----  --------------------------  --------  ------------
+   5  2021-09-06 12:39:34.408866
+   4  2021-09-06 12:39:34.403676
+   3  2021-09-06 12:39:34.398722
+   2  2021-09-06 12:39:34.394237
+   1  2021-09-06 12:39:34.387872
+```
+
+We can also add "actions" to this, like `kill`:
+
+```console
+$ tox process kill 3
+Scheduled node pk 3 to be killed
+$ tox process scheduled
+  PK  Modified                    Action    Worker PID
+----  --------------------------  --------  ------------
+   5  2021-09-06 12:39:34.408866
+   4  2021-09-06 12:39:34.403676
+   3  2021-09-06 12:39:34.398722  kill
+   2  2021-09-06 12:39:34.394237
+   1  2021-09-06 12:39:34.387872
+```
 
 If we start the daemon, with two workers, the coordinator will distribute the processes evenly to the workers:
 
 ```console
 $ tox daemon start 2
+$ tox daemon status -q
+aiida-coordinator:
+- '12022'
+aiida-workers:
+- '12023'
+- '12024'
+circusd-stats:
+- '12025'
+$ tox process scheduled
+  PK  Modified                    Action      Worker PID
+----  --------------------------  --------  ------------
+   5  2021-09-06 12:46:52.976776                   12024
+   4  2021-09-06 12:46:52.971709                   12023
+   2  2021-09-06 12:46:52.966902                   12024
+   1  2021-09-06 12:46:52.961325                   12023
+$ tox process list
+  PK  Modified                    Status
+----  --------------------------  --------
+   3  2021-09-06 12:46:52.993646  killed
+   5  2021-09-06 12:46:52.990090  running
+   4  2021-09-06 12:46:52.986570  running
+   2  2021-09-06 12:46:52.985670  running
+   1  2021-09-06 12:46:52.982983  running
 ```
 
-<table><tr><th>id</th><th>mtime</th><th>dbnode_id</th><th>action</th><th>worker_pid</th><th>worker_uuid</th><tr><tr><td>1</td><td>2021-09-05 02:06:20.220162</td><td>1</td><td>NULL</td><td>25267</td><td>345d6810-0a7c-465e-b513-c8ca16c64966</td></tr><tr><td>2</td><td>2021-09-05 02:06:20.226971</td><td>2</td><td>NULL</td><td>25266</td><td>4ae05820-8f88-4e8f-8ebd-68fa6182f162</td></tr><tr><td>3</td><td>2021-09-05 02:06:20.232902</td><td>3</td><td>NULL</td><td>25267</td><td>345d6810-0a7c-465e-b513-c8ca16c64966</td></tr><tr><td>4</td><td>2021-09-05 02:06:20.237730</td><td>4</td><td>NULL</td><td>25266</td><td>4ae05820-8f88-4e8f-8ebd-68fa6182f162</td></tr><tr><td>5</td><td>2021-09-05 02:06:20.243235</td><td>5</td><td>NULL</td><td>25267</td><td>345d6810-0a7c-465e-b513-c8ca16c64966</td></tr><tr><td>6</td><td>2021-09-05 02:06:20.249431</td><td>6</td><td>NULL</td><td>25266</td><td>4ae05820-8f88-4e8f-8ebd-68fa6182f162</td></tr><tr><td>7</td><td>2021-09-05 02:06:20.255207</td><td>7</td><td>NULL</td><td>25267</td><td>345d6810-0a7c-465e-b513-c8ca16c64966</td></tr><tr><td>8</td><td>2021-09-05 02:06:20.260356</td><td>8</td><td>NULL</td><td>25266</td><td>4ae05820-8f88-4e8f-8ebd-68fa6182f162</td></tr><tr><td>9</td><td>2021-09-05 02:06:20.265834</td><td>9</td><td>NULL</td><td>25267</td><td>345d6810-0a7c-465e-b513-c8ca16c64966</td></tr><tr><td>10</td><td>2021-09-05 02:06:20.270775</td><td>10</td><td>NULL</td><td>25266</td><td>4ae05820-8f88-4e8f-8ebd-68fa6182f162</td></tr></table>
+If we then decrease the number of workers, the coordinator will re-distribute the processes to remaining workers:
+
+```console
+$ tox daemon decr
+$ tox process scheduled
+  PK  Modified                    Action      Worker PID
+----  --------------------------  --------  ------------
+   4  2021-09-06 12:47:36.919519                   12024
+   1  2021-09-06 12:47:36.913779                   12024
+   5  2021-09-06 12:46:52.976776                   12024
+   2  2021-09-06 12:46:52.966902                   12024
+```
 
 If we stop the daemon part way through, and re-start with a single worker, the coordinator will re-assign the processes to that worker:
 
-```console
-$ tox daemon stop
-$ tox daemon start 1
-```
-
-<table><tr><th>id</th><th>mtime</th><th>dbnode_id</th><th>action</th><th>worker_pid</th><th>worker_uuid</th><tr><tr><td>2</td><td>2021-09-05 02:12:06.070548</td><td>2</td><td>NULL</td><td>25754</td><td>4297ea48-b9a4-4f50-a00e-b983410104d0</td></tr><tr><td>4</td><td>2021-09-05 02:12:06.076692</td><td>4</td><td>NULL</td><td>25754</td><td>4297ea48-b9a4-4f50-a00e-b983410104d0</td></tr><tr><td>6</td><td>2021-09-05 02:12:06.081961</td><td>6</td><td>NULL</td><td>25754</td><td>4297ea48-b9a4-4f50-a00e-b983410104d0</td></tr><tr><td>8</td><td>2021-09-05 02:12:06.086706</td><td>8</td><td>NULL</td><td>25754</td><td>4297ea48-b9a4-4f50-a00e-b983410104d0</td></tr><tr><td>10</td><td>2021-09-05 02:12:06.091502</td><td>10</td><td>NULL</td><td>25754</td><td>4297ea48-b9a4-4f50-a00e-b983410104d0</td></tr></table>
-
 Once completed, the `db_dbprocess` table will be empty, and the `db_dbnode` table will contain all terminated processes:
 
-<table><tr><th>id</th><th>mtime</th><th>status</th><tr><tr><td>1</td><td>2021-09-05 02:07:22.528752</td><td>finished</td></tr><tr><td>2</td><td>2021-09-05 02:13:08.312547</td><td>finished</td></tr><tr><td>3</td><td>2021-09-05 02:07:22.535125</td><td>finished</td></tr><tr><td>4</td><td>2021-09-05 02:13:08.316970</td><td>finished</td></tr><tr><td>5</td><td>2021-09-05 02:07:22.538566</td><td>finished</td></tr><tr><td>6</td><td>2021-09-05 02:13:08.320571</td><td>finished</td></tr><tr><td>7</td><td>2021-09-05 02:07:22.547629</td><td>finished</td></tr><tr><td>8</td><td>2021-09-05 02:13:08.327909</td><td>finished</td></tr><tr><td>9</td><td>2021-09-05 02:07:22.550764</td><td>finished</td></tr><tr><td>10</td><td>2021-09-05 02:13:08.330605</td><td>finished</td></tr></table>
+```console
+$ tox process scheduled
+PK    Modified    Action    Worker PID
+----  ----------  --------  ------------
+$ tox process list
+  PK  Modified                    Status
+----  --------------------------  --------
+   4  2021-09-06 12:48:36.917000  finished
+   1  2021-09-06 12:48:36.912941  finished
+   5  2021-09-06 12:47:53.002793  finished
+   2  2021-09-06 12:47:52.995835  finished
+   3  2021-09-06 12:46:52.993646  killed
+```
 
 If we look in the daemon log files, we can see how progression of the coordinator and workers:
 
 `workdir/watcher-aiida-coordinator.log`
 
 ```log
-INFO:server-501-25265:[STARTING] server is starting...
-INFO:server-501-25265:[LISTENING] Server is listening on ('192.168.0.154', 59483)
-INFO:server-501-25265:[NEW CONNECTION] ('192.168.0.154', 59486) connected.
-INFO:server-501-25265:[ACTIVE CONNECTIONS] 1
-INFO:server-501-25265:[('192.168.0.154', 59486)] process PID 25267
-INFO:server-501-25265:[NEW CONNECTION] ('192.168.0.154', 59487) connected.
-INFO:server-501-25265:[ACTIVE CONNECTIONS] 2
-INFO:server-501-25265:[('192.168.0.154', 59487)] process PID 25266
-INFO:server-501-25265:[DB] Submitting process 1 (node 1) to worker PID 25267
-INFO:server-501-25265:[DB] Submitting process 2 (node 2) to worker PID 25266
-INFO:server-501-25265:[DB] Submitting process 3 (node 3) to worker PID 25267
-INFO:server-501-25265:[DB] Submitting process 4 (node 4) to worker PID 25266
-INFO:server-501-25265:[DB] Submitting process 5 (node 5) to worker PID 25267
-INFO:server-501-25265:[DB] Submitting process 6 (node 6) to worker PID 25266
-INFO:server-501-25265:[DB] Submitting process 7 (node 7) to worker PID 25267
-INFO:server-501-25265:[DB] Submitting process 8 (node 8) to worker PID 25266
-INFO:server-501-25265:[DB] Submitting process 9 (node 9) to worker PID 25267
-INFO:server-501-25265:[DB] Submitting process 10 (node 10) to worker PID 25266
-INFO:server-501-25753:[STARTING] server is starting...
-INFO:server-501-25753:[LISTENING] Server is listening on ('192.168.0.154', 59591)
-INFO:server-501-25753:[NEW CONNECTION] ('192.168.0.154', 59594) connected.
-INFO:server-501-25753:[ACTIVE CONNECTIONS] 1
-INFO:server-501-25753:[('192.168.0.154', 59594)] process PID 25754
-INFO:server-501-25753:[DB] Submitting process 2 (node 2) to worker PID 25754
-INFO:server-501-25753:[DB] Submitting process 4 (node 4) to worker PID 25754
-INFO:server-501-25753:[DB] Submitting process 6 (node 6) to worker PID 25754
-INFO:server-501-25753:[DB] Submitting process 8 (node 8) to worker PID 25754
-INFO:server-501-25753:[DB] Submitting process 10 (node 10) to worker PID 25754
+INFO:server-501-12022:[STARTING] coordinator is starting...
+INFO:server-501-12022:[SERVING] on ('192.168.0.154', 59080)
+INFO:server-501-12022:[NEW CONNECTION] ('192.168.0.154', 59083)
+INFO:server-501-12022:[NEW CONNECTION] ('192.168.0.154', 59084)
+INFO:server-501-12022:[HANDSHAKE COMPLETE] ('192.168.0.154', 59083) PID 12023
+INFO:server-501-12022:[STORED CONNECTIONS] 1
+INFO:server-501-12022:[HANDSHAKE COMPLETE] ('192.168.0.154', 59084) PID 12024
+INFO:server-501-12022:[STORED CONNECTIONS] 2
+INFO:server-501-12022:[PROCESS] Continuing process 1 (node 1) on worker 12023
+INFO:server-501-12022:[PROCESS] Continuing process 2 (node 2) on worker 12024
+INFO:server-501-12022:[PROCESS] Continuing process 4 (node 4) on worker 12023
+INFO:server-501-12022:[PROCESS] Continuing process 5 (node 5) on worker 12024
+INFO:server-501-12022:[PROCESS] Continuing process 3 (node 3) on worker 12023
+INFO:server-501-12022:[PROCESS] Killing process 3 (node 3) on worker 12023
+INFO:server-501-12022:[REMOVE DEAD WORKER] 12023
+INFO:server-501-12022:[PROCESS] Continuing process 1 (node 1) on worker 12024
+INFO:server-501-12022:[PROCESS] Continuing process 4 (node 4) on worker 12024
 ```
 
 `workdir/watcher-aiida-workers.log`
 
 ```log
-INFO:worker-501-25267:[STARTING] worker is starting...
-INFO:worker-501-25267:[CONNECTED] to server: ('192.168.0.154', 59483)
-INFO:worker-501-25266:[STARTING] worker is starting...
-INFO:worker-501-25266:[CONNECTED] to server: ('192.168.0.154', 59483)
-INFO:worker-501-25267:[SUBMIT] process 1
-INFO:worker-501-25266:[SUBMIT] process 2
-INFO:worker-501-25267:[SUBMIT] process 3
-INFO:worker-501-25266:[SUBMIT] process 4
-INFO:worker-501-25267:[SUBMIT] process 5
-INFO:worker-501-25266:[SUBMIT] process 6
-INFO:worker-501-25267:[SUBMIT] process 7
-INFO:worker-501-25266:[SUBMIT] process 8
-INFO:worker-501-25267:[SUBMIT] process 9
-INFO:worker-501-25266:[SUBMIT] process 10
-INFO:worker-501-25267:[FINISH] process 1
-INFO:worker-501-25267:[FINISH] process 3
-INFO:worker-501-25267:[FINISH] process 5
-INFO:worker-501-25267:[FINISH] process 7
-INFO:worker-501-25267:[FINISH] process 9
-INFO:worker-501-25754:[STARTING] worker is starting...
-INFO:worker-501-25754:[CONNECTED] to server: ('192.168.0.154', 59591)
-INFO:worker-501-25754:[SUBMIT] process 2
-INFO:worker-501-25754:[SUBMIT] process 4
-INFO:worker-501-25754:[SUBMIT] process 6
-INFO:worker-501-25754:[SUBMIT] process 8
-INFO:worker-501-25754:[SUBMIT] process 10
-INFO:worker-501-25754:[FINISH] process 2
-INFO:worker-501-25754:[FINISH] process 4
-INFO:worker-501-25754:[FINISH] process 6
-INFO:worker-501-25754:[FINISH] process 8
-INFO:worker-501-25754:[FINISH] process 10
+INFO:worker-501-12023:[STARTING] worker is starting...
+INFO:worker-501-12023:[CONNECTING] to server: ('192.168.0.154', 59080)
+INFO:worker-501-12023:[HANDSHAKE COMPLETE]
+INFO:worker-501-12024:[STARTING] worker is starting...
+INFO:worker-501-12024:[CONNECTING] to server: ('192.168.0.154', 59080)
+INFO:worker-501-12024:[HANDSHAKE COMPLETE]
+INFO:worker-501-12023:[CONTINUE] process node 1
+INFO:worker-501-12024:[CONTINUE] process node 2
+INFO:worker-501-12023:[CONTINUE] process node 4
+INFO:worker-501-12024:[CONTINUE] process node 5
+INFO:worker-501-12023:[CONTINUE] process node 3
+INFO:worker-501-12023:[KILLED] process 3
+INFO:worker-501-12024:[CONTINUE] process node 1
+INFO:worker-501-12024:[CONTINUE] process node 4
+INFO:worker-501-12024:[FINISH] process 2
+INFO:worker-501-12024:[FINISH] process 5
+INFO:worker-501-12024:[FINISH] process 1
+INFO:worker-501-12024:[FINISH] process 4
 ```
 
-You can play around with increasing/decreasing the number of workers and submitting additional processes while the daemon is running:
+If running a large amount of processes you can use `process status` to summarise the load on the workers:
 
 ```console
-$ tox daemon incr
-$ tox daemon decr
-$ tox daemon status
-```
-
-You can easily introspect the status of running processes with e.g.:
-
-```console
-$ tox database submit 1000
-$ tox daemon start 3
-$ tox database status
-Process nodes: 1000
+$ tox daemon incr 2
+$ tox process submit 1000
+$ tox process status
+Process nodes: 1005
 Non-terminated nodes: 600
 Active processes: 600
 Worker loads (PID -> count/max):
@@ -222,14 +293,19 @@ To stop the daemon and remove the work directory:
 $ tox daemon stop -- --clear
 ```
 
+To remove the database:
+
+```console
+$ tox process remove-db
+```
+
 ## TODO
 
-- Implement handling of actions
+- Implement handling of pause/play actions
+- Implement nested submission callbacks
 - Simple CLI command, to ensure node and process table are in-sync (i.e. no non-terminated nodes not in process table)
-- Use IPC sockets (over TCP)
-- Use circus plugins like: https://circus.readthedocs.io/en/latest/for-ops/using-plugins/#flapping
+- Use IPC sockets (over TCP)? (for security)
+- Use circus plugins like: <https://circus.readthedocs.io/en/latest/for-ops/using-plugins/#flapping>
 - Also think about where Process checkpoint lives
-- bi-directional heartbeat (ensure workers immediately stop their running processes, if the connection to the coordinator is lost, to void duplication)
-- higher-level APIs?
-  - https://docs.python.org/3/library/socketserver.html#module-socketserver
-  - https://docs.python.org/3/library/asyncio-stream.html
+
+See also `TODO` in the code-base.

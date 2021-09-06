@@ -3,6 +3,7 @@ import shutil
 import socket
 import sys
 from typing import Optional
+from uuid import uuid4
 
 import click
 import yaml
@@ -95,6 +96,8 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
     logfile_worker = os.path.join(workdir, f"watcher-{worker_name}.log")
     logfile_coordinator = os.path.join(workdir, f"watcher-{coordinator_name}.log")
 
+    network_uuid = str(uuid4())
+
     if os.path.exists(pidfile):
         raise click.ClickException(f"PID file already exists: {pidfile}")
 
@@ -112,9 +115,12 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
         "watchers": [
             {
                 "cmd": (
-                    f"aiida-coordinator --log-level {log_level}"
-                    " --fd $(circus.sockets.messaging)"
+                    f"aiida-coordinator"
+                    " --socket-fd $(circus.sockets.messaging)"
+                    f" --circus-endpoint {DEFAULT_ENDPOINT_DEALER}"
                     f" --db-path {db.path}"
+                    f" --log-level {log_level}"
+                    f" {network_uuid}"
                 ),
                 "name": coordinator_name,
                 "singleton": True,
@@ -131,11 +137,13 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
                     "filename": logfile_coordinator,
                 },
             },
+            # TODO delay start of worker until server has started?
             {
                 "cmd": (
                     f"aiida-worker --log-level {log_level}"
-                    " --fd $(circus.sockets.messaging)"
+                    " --socket-fd $(circus.sockets.messaging)"
                     f" --db-path {db.path}"
+                    f" {network_uuid}"
                 ),
                 "name": worker_name,
                 "numprocesses": number,
@@ -231,15 +239,19 @@ def circus_stop(db, workdir, clear):
     default="all",
     type=click.Choice(("all", WATCHER_WORKER_NAME, WATCHER_COORDINATOR_NAME)),
 )
+@click.option("-q", "--quiet", is_flag=True, help="Only print certain information")
 @OPT_WORKDIR
-def circus_status(watcher, workdir):
+def circus_status(watcher, workdir, quiet):
     """Get process status"""
     client = get_circus_client(workdir=workdir)
     if watcher == "all":
         result = client.call({"command": "stats"})
     else:
         result = client.call({"command": "stats", "properties": {"name": watcher}})
-    click.echo(yaml.dump(result))
+    if not quiet:
+        click.echo(yaml.dump(result))
+    else:
+        click.echo(yaml.dump({key: list(val) for key, val in result["infos"].items()}))
 
 
 @daemon.command("incr")
@@ -262,5 +274,18 @@ def circus_decr(number, workdir):
     client = get_circus_client(workdir=workdir)
     result = client.call(
         {"command": "decr", "properties": {"name": WATCHER_WORKER_NAME, "nb": number}}
+    )
+    click.echo(yaml.dump(result))
+
+
+@daemon.command("kill-worker")
+@click.argument("pid", type=int, required=True)
+@OPT_WORKDIR
+def circus_kill_proc(pid, workdir):
+    """Kill a managed process"""
+    client = get_circus_client(workdir=workdir)
+    # other properties: signum and graceful_timeout
+    result = client.call(
+        {"command": "kill", "properties": {"name": WATCHER_WORKER_NAME, "pid": pid}}
     )
     click.echo(yaml.dump(result))
