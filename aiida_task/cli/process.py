@@ -132,7 +132,8 @@ def submit(db: DatabaseContext, number: int, workdir: str):
             except OperationalError:
                 click.echo("Database locked, skipping!")
                 session.rollback()
-    push_to_coordinator(workdir)
+            # to test push throttling, we push after every submit
+            push_to_coordinator(workdir)
 
 
 @process.command("kill")

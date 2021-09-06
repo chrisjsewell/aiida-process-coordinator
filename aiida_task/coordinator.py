@@ -181,9 +181,11 @@ async def coordinate_processes(
         # and poll the database immediately
         # if not, we wait for longer, to reduce the load on the cpu/database
         if check_db:
+            SERVER_LOGGER.debug("[POLLING IMMEDIATELY]")
             await asyncio.sleep(0)
             check_db.clear()
-        await asyncio.sleep(DATABASE_POLL_MS / 1000)
+        else:
+            await asyncio.sleep(DATABASE_POLL_MS / 1000)
 
         # clean up the workers:
         # TODO Here we want to remove any workers that are no longer running from the record
@@ -309,10 +311,6 @@ async def continue_process(
     process: ProcessSchedule, session: Session, worker: WorkerConnection
 ) -> bool:
     """Send the continue task to the worker"""
-    SERVER_LOGGER.info(
-        f"[PROCESS] Continuing process {process.id} (node {process.dbnode_id}) "
-        f"on worker {worker.pid}"
-    )
 
     # TODO maybe ideally save to database once process is successfully sent to worker
     # but what if database save fails (mainly an sqlite issue)
@@ -324,6 +322,11 @@ async def continue_process(
         # for sqlite only, database could be locked by worker writing
         session.rollback()
         return False
+
+    SERVER_LOGGER.info(
+        f"[PROCESS] Continuing process {process.id} (node {process.dbnode_id}) "
+        f"on worker {worker.pid}"
+    )
 
     try:
         await send_json(
