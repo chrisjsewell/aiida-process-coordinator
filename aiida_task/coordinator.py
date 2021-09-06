@@ -95,6 +95,7 @@ async def main(
     async def push_connect_callback(reader: StreamReader, writer: StreamWriter):
         # check for actual message?
         SERVER_LOGGER.debug("[RECEIVED PUSH]")
+        # TODO this may need throttling, if e.g. lots of pushes are received at the same time
         check_db.add(True)
         writer.close()
 
@@ -185,6 +186,7 @@ async def coordinate_processes(
             await asyncio.sleep(0)
             check_db.clear()
         else:
+            # TODO we should cancel this sleep, as soon as we receive a push message
             await asyncio.sleep(DATABASE_POLL_MS / 1000)
 
         # clean up the workers:
