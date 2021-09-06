@@ -10,6 +10,7 @@ from sqlalchemy.exc import OperationalError
 from aiida_task.database import TERMINATED_STATES, Node, ProcessSchedule
 from aiida_task.shared import MAX_PROCS_PER_WORKER
 
+from .daemon import OPT_WORKDIR, push_to_coordinator
 from .main import DatabaseContext, main, pass_db
 
 
@@ -114,8 +115,9 @@ def process_list_active(db: DatabaseContext, last: int):
 
 @process.command("submit")
 @click.argument("number", type=int, default=1)
+@OPT_WORKDIR
 @pass_db
-def submit(db: DatabaseContext, number: int):
+def submit(db: DatabaseContext, number: int, workdir: str):
     """Create and submit a process"""
     with db as session:
         for _ in range(number):
@@ -130,12 +132,14 @@ def submit(db: DatabaseContext, number: int):
             except OperationalError:
                 click.echo("Database locked, skipping!")
                 session.rollback()
+    push_to_coordinator(workdir)
 
 
 @process.command("kill")
 @click.argument("pk", type=int)
+@OPT_WORKDIR
 @pass_db
-def kill(db: DatabaseContext, pk: int):
+def kill(db: DatabaseContext, pk: int, workdir: str):
     """Kill a process node"""
     with db as session:
         if not session.execute(
@@ -149,4 +153,5 @@ def kill(db: DatabaseContext, pk: int):
             .values(action="kill")
         )
         session.commit()
+    push_to_coordinator(workdir)
     click.echo(f"Scheduled node pk {pk} to be killed")

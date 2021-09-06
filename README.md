@@ -27,6 +27,12 @@ These are the major requirements for the coordinator:
 - Handle pause/play and kill requests for Processes
 - Handle nested submissions, i.e. Processes that submit sub-Processes, and must wait on their completion before continuing
 
+Additional desirable requirements:
+
+- Low background CPU / memory usage when idle
+- Low latency in actioning new tasks
+- Low latency in detecting dead / unresponsive workers
+
 ## Why replace RabbitMQ?
 
 In short:
