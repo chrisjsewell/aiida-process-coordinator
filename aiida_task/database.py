@@ -17,7 +17,7 @@ from sqlalchemy.sql.expression import text
 
 Base = declarative_base()
 
-TERMINATED_STATES = ("finished", "excepted")
+TERMINATED_STATES = ("finished", "excepted", "killed")
 
 
 class Node(Base):
@@ -34,7 +34,7 @@ class Node(Base):
         return self.status in TERMINATED_STATES
 
 
-class ActiveProcesses(Base):
+class ProcessSchedule(Base):
     """A new table, which stores information about running processes."""
 
     __tablename__ = "db_dbprocess"
