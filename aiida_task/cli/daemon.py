@@ -2,7 +2,8 @@ import os
 import shutil
 import socket
 import sys
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 from uuid import uuid4
 
 import click
@@ -30,6 +31,7 @@ CIRCUS_PID_FILE = "circus.pid"
 CIRCUS_LOG_FILE = "circus.log"
 WATCHER_WORKER_NAME = "aiida-workers"
 WATCHER_COORDINATOR_NAME = "aiida-coordinator"
+COORDINATOR_PUSH_FILE = "aiida-coordinator-push.txt"
 
 
 def get_env():
@@ -37,6 +39,32 @@ def get_env():
     currenv["PATH"] = f"{os.path.dirname(sys.executable)}:{currenv['PATH']}"
     currenv["PYTHONUNBUFFERED"] = "True"
     return currenv
+
+
+def get_available_port() -> Tuple[str, int]:
+    """
+    Get an available port from the operating system
+
+    :return: a currently available hostname, port
+    """
+    open_socket = socket.socket()
+    open_socket.bind((socket.gethostbyname(socket.gethostname()), 0))
+    return open_socket.getsockname()
+
+
+def send_push_notification(workdir=None, assert_exists=False) -> None:
+    """Send a push message to the coordinator (if running), to inform it the database has changed."""
+    pfile = (Path(workdir) if workdir else Path.cwd() / "workdir").joinpath(
+        COORDINATOR_PUSH_FILE
+    )
+    if not pfile.exists():
+        if assert_exists:
+            raise OSError("The push file does not exist: {}")
+        return
+    host, port = pfile.read_text(encoding="utf8").splitlines()
+    sock = socket.socket(SOCKET_FAMILY, SOCKET_TYPE)
+    sock.connect((host, int(port)))
+    sock.close()
 
 
 def get_circus_client(
@@ -95,6 +123,7 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
     logfile_circus = os.path.join(workdir, CIRCUS_LOG_FILE)
     logfile_worker = os.path.join(workdir, f"watcher-{worker_name}.log")
     logfile_coordinator = os.path.join(workdir, f"watcher-{coordinator_name}.log")
+    push_file = Path(workdir).joinpath(COORDINATOR_PUSH_FILE)
 
     network_uuid = str(uuid4())
 
@@ -116,7 +145,8 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
             {
                 "cmd": (
                     f"aiida-coordinator"
-                    " --socket-fd $(circus.sockets.messaging)"
+                    " --worker-fd $(circus.sockets.coord2work)"
+                    " --push-fd $(circus.sockets.push2coord)"
                     f" --circus-endpoint {DEFAULT_ENDPOINT_DEALER}"
                     f" --db-path {db.path}"
                     f" --log-level {log_level}"
@@ -141,7 +171,7 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
             {
                 "cmd": (
                     f"aiida-worker --log-level {log_level}"
-                    " --socket-fd $(circus.sockets.messaging)"
+                    " --socket-fd $(circus.sockets.coord2work)"
                     f" --db-path {db.path}"
                     f" {network_uuid}"
                 ),
@@ -169,7 +199,7 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
     # important: sockets have to be created, after daemonizing
     arbiter_config["sockets"] = [
         CircusSocket(
-            name="messaging",
+            name="coord2work",
             host=socket.gethostbyname(socket.gethostname()),
             port=0,  # pick an available port
             family=SOCKET_FAMILY,
@@ -177,6 +207,20 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
             blocking=False,
         )
     ]
+    # TODO ideally here, we would just leave this to the arbiter
+    # but then we would not be able to record it
+    host, port = get_available_port()
+    arbiter_config["sockets"].append(
+        CircusSocket(
+            name="push2coord",
+            host=host,
+            port=port,
+            family=SOCKET_FAMILY,
+            type=SOCKET_TYPE,
+            blocking=False,
+        )
+    )
+    push_file.write_text(f"{host}\n{port}", encoding="utf8")
 
     arbiter = get_arbiter(**arbiter_config)
     pidfile = Pidfile(arbiter.pidfile)
@@ -213,6 +257,8 @@ def circus_start(db: DatabaseContext, number, workdir, log_level, foreground):
             arbiter = None
             if pidfile is not None:
                 pidfile.unlink()
+            if push_file.exists():
+                push_file.unlink()
 
 
 @daemon.command("stop")
@@ -226,7 +272,7 @@ def circus_stop(db, workdir, clear):
     click.echo(yaml.dump(result))
     if clear:
         shutil.rmtree(workdir, ignore_errors=True)
-    # ensure database is cleaned up
+    # ensure database is cleaned up (sqlite only)
     with db as session:
         session.commit()
 
