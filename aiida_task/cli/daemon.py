@@ -52,11 +52,11 @@ def get_available_port() -> Tuple[str, int]:
     return open_socket.getsockname()
 
 
-def push_to_coordinator(workdir=None, assert_exists=False) -> None:
-    """Send a push message to the receiver, to inform it the database has changed."""
-    pfile = (
-        Path(workdir) if workdir else Path.cwd() / "workdir"
-    ) / COORDINATOR_PUSH_FILE
+def send_push_notification(workdir=None, assert_exists=False) -> None:
+    """Send a push message to the coordinator (if running), to inform it the database has changed."""
+    pfile = (Path(workdir) if workdir else Path.cwd() / "workdir").joinpath(
+        COORDINATOR_PUSH_FILE
+    )
     if not pfile.exists():
         if assert_exists:
             raise OSError("The push file does not exist: {}")

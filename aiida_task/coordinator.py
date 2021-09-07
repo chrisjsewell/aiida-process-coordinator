@@ -2,7 +2,9 @@ import asyncio
 import logging
 import os
 from asyncio.streams import StreamReader, StreamWriter
-from typing import Dict, NamedTuple, Set
+from asyncio.tasks import Task
+from dataclasses import dataclass
+from typing import Dict, Optional, Set
 
 import click
 import psutil
@@ -10,13 +12,13 @@ from sqlalchemy import func as sql_func
 from sqlalchemy import select as sql_select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
-from sqlalchemy.sql.expression import update
+from sqlalchemy.sql.expression import delete, update
 
-from aiida_task.database import ProcessSchedule, get_session
+from aiida_task.database import Node, ProcessSchedule, get_session
 
 from .cli.daemon import OPT_LOGLEVEL
 from .shared import (
-    DATABASE_POLL_MS,
+    DB_POLL_SLEEP_INTERVAL_MS,
     HANDSHAKE_TIMEOUT,
     MAX_PROCS_PER_WORKER,
     get_socket_from_fd,
@@ -56,7 +58,8 @@ def start_coordinator(
     )
 
 
-class WorkerConnection(NamedTuple):
+@dataclass
+class WorkerConnection:
     """Information about a connected worker."""
 
     pid: int
@@ -64,6 +67,15 @@ class WorkerConnection(NamedTuple):
     ctime: float
     reader: StreamReader
     writer: StreamWriter
+    dead: bool = False
+
+
+@dataclass
+class PollSleep:
+    """A poll sleep task."""
+
+    sleep: bool
+    task: Optional[Task]
 
 
 async def main(
@@ -80,23 +92,33 @@ async def main(
 
     # pid -> connection details
     workers: Dict[int, WorkerConnection] = {}
+    poll_sleep = PollSleep(sleep=False, task=None)
+
+    def _cancel_poll_sleep():
+        if poll_sleep.task is not None:
+            # the polling is sleeping, cancel it
+            poll_sleep.task.cancel()
+            poll_sleep.task = None
+        else:
+            # the polling is not sleeping, make sure to re-poll immediately
+            poll_sleep.sleep = False
 
     # Start the server listening for worker connections
     worker_sock = get_socket_from_fd(worker_fd)
     worker_server = await asyncio.start_server(
-        create_worker_connect_cb(network_uuid, workers), sock=worker_sock
+        create_worker_connect_cb(network_uuid, workers, _cancel_poll_sleep),
+        sock=worker_sock,
     )
     SERVER_LOGGER.info("[LISTENING] for workers on %s", worker_sock.getsockname())
 
     # Start the server listening for user connections
     push_sock = get_socket_from_fd(push_fd)
-    check_db = {True}  # any mutable object will do
 
     async def push_connect_callback(reader: StreamReader, writer: StreamWriter):
         # check for actual message?
         SERVER_LOGGER.debug("[RECEIVED PUSH]")
         # TODO this may need throttling, if e.g. lots of pushes are received at the same time
-        check_db.add(True)
+        _cancel_poll_sleep()
         writer.close()
 
     push_server = await asyncio.start_server(push_connect_callback, sock=push_sock)
@@ -104,13 +126,21 @@ async def main(
 
     async with worker_server:
         async with push_server:
-            # start polling the database
-            await coordinate_processes(circus_endpoint, db_path, workers, check_db)
+            task = asyncio.create_task(detect_dead_workers(workers, _cancel_poll_sleep))
+            try:
+                # start polling the database
+                await coordinate_processes(
+                    circus_endpoint, db_path, workers, poll_sleep
+                )
+            finally:
+                task.cancel()
 
     SERVER_LOGGER.info("[STOPPED]")
 
 
-def create_worker_connect_cb(network_uuid: str, workers: Dict[int, WorkerConnection]):
+def create_worker_connect_cb(
+    network_uuid: str, workers: Dict[int, WorkerConnection], cancel_poll_sleep
+):
     async def _accept_connection(reader: StreamReader, writer: StreamWriter):
         """On a new connection, we perform a handshake with the worker, then store it for later communication"""
         addr = writer.get_extra_info("peername")
@@ -144,14 +174,58 @@ def create_worker_connect_cb(network_uuid: str, workers: Dict[int, WorkerConnect
         )
         SERVER_LOGGER.info(f"[STORED CONNECTIONS] {len(workers)}")
 
+        cancel_poll_sleep()
+
     return _accept_connection
+
+
+async def detect_dead_workers(workers: Dict[int, WorkerConnection], cancel_poll_sleep):
+    """Mark dead workers."""
+
+    # Here we want to mark any workers that are no longer running.
+    # so that the processes they were running can be re-assigned.
+    # We do not actually remove it here,
+    # to avoid changing the dictionary size in coordinate_processes.
+
+    # TODO We can easily identify PIDs that are no longer running,
+    # more tricky though is identifying any workers that are unresponsive,
+    # We could ping the worker and await a response (perhaps containing the processes it is running),
+    # but that is problematic if the worker is very busy and takes time to respond
+    # (how long should we wait before timing out?)
+
+    while True:
+
+        await asyncio.sleep(0.1)
+
+        for worker in workers.values():
+            if worker.dead:
+                continue
+            dead = False
+            try:
+                proc = psutil.Process(worker.pid)
+            except psutil.NoSuchProcess:
+                dead = True
+            except Exception:  # TODO can this fail in any other way?
+                pass
+            else:
+                # guard against PID re-use
+                if proc.create_time() > worker.ctime:
+                    dead = True
+            if dead:
+                SERVER_LOGGER.info("[REMOVE DEAD WORKER] %s", worker.pid)
+                try:
+                    worker.writer.close()
+                except Exception:
+                    pass
+                worker.dead = True
+                cancel_poll_sleep()
 
 
 async def coordinate_processes(
     circus_endpoint: str,
     db_path: str,
     workers: Dict[int, WorkerConnection],
-    check_db: Set[bool],
+    poll_sleep: PollSleep,
 ):
     """Connect to the databas and handle submitting processes to workers
 
@@ -175,52 +249,40 @@ async def coordinate_processes(
     # to avoid logging duplication
     killing: Set[int] = set()
 
-    while True:
+    # for sqlite we restart the session every loop to deal with write locking,
+    # but for postgresql we can probably just have a single session open
+    with session:
 
-        # relinquish control to other tasks
-        # If we have received a "push" message, we know there are changes to the database
-        # and poll the database immediately
-        # if not, we wait for longer, to reduce the load on the cpu/database
-        if check_db:
-            SERVER_LOGGER.debug("[POLLING IMMEDIATELY]")
-            await asyncio.sleep(0)
-            check_db.clear()
-        else:
-            # TODO we should cancel this sleep, as soon as we receive a push message
-            await asyncio.sleep(DATABASE_POLL_MS / 1000)
+        while True:
 
-        # clean up the workers:
-        # TODO Here we want to remove any workers that are no longer running from the record
-        # so that the processes they were running can be re-assigned.
-        # We can easily identify PIDs that are no longer running,
-        # more tricky though is identifying any PIDs that have been re-used,
-        # (or perhaps workers that are hanging)
-        # We could ping the worker and await a response (perhaps containing the processes it is running),
-        # but that is problematic if the worker is very busy and takes time to respond
-        # (how long should we wait before timing out?)
-        # Probably an extra layer here, is to have an additional async task running in the background,
-        # which polls the workers with a pretty large timeout, and then removes any workers that do not respond
-        for worker_pid in list(workers):
-            remove = False
-            try:
-                proc = psutil.Process(worker_pid)
-            except psutil.NoSuchProcess:  # TODO can this fail in any other way?
-                remove = True
-            else:
-                # guard against PID re-use
-                if proc.create_time() > workers[worker_pid].ctime:
-                    remove = True
-            if remove:
-                SERVER_LOGGER.info("[REMOVE DEAD WORKER] %s", worker_pid)
+            # relinquish control to other tasks and sleep until the next poll interval
+            # If a change event has occurred
+            # (receive a "push" message, or a worker has been added/removed),
+            # we know we need to poll the database immediately (no sleep)
+            # if not, we sleep for longer, to reduce the load on the cpu/database,
+            # but cancel this sleep, on a change event
+            if poll_sleep.sleep:
+                SERVER_LOGGER.debug("[SLEEPING]")
+                task = asyncio.create_task(
+                    asyncio.sleep(DB_POLL_SLEEP_INTERVAL_MS / 1000)
+                )
+                poll_sleep.task = task
                 try:
-                    workers[worker_pid].writer.close()
-                except Exception:
-                    pass
-                workers.pop(worker_pid)
+                    await task
+                except asyncio.CancelledError:
+                    SERVER_LOGGER.debug("[SLEEP CANCELLED]")
+                else:
+                    SERVER_LOGGER.debug("[SLEEP FINISHED]")
+                poll_sleep.task = None
+            else:
+                SERVER_LOGGER.debug("[NOT SLEEPING]")
+                await asyncio.sleep(1)
+            poll_sleep.sleep = True
 
-        # for sqlite we restart the session every loop to deal with write locking,
-        # but for postgresql we can probably just have a single session open
-        with session:
+            # remove dead workers
+            for worker_pid, worker in list(workers.items()):
+                if worker.dead:
+                    workers.pop(worker_pid)
 
             # remove old workers from database
             try:
@@ -233,6 +295,7 @@ async def coordinate_processes(
             except OperationalError:
                 # for sqlite only, database could be locked by worker writing
                 session.rollback()
+                poll_sleep.sleep = False
                 continue
 
             if not workers:
@@ -245,22 +308,32 @@ async def coordinate_processes(
             for pid in workers:
                 worker_procs.setdefault(pid, 0)
 
+            # delete terminated processes from schedule
+            try:
+                stmt = (
+                    sql_select(ProcessSchedule.id)
+                    .join(Node)
+                    .where(Node.status.in_(("finished", "excepted", "killed")))
+                )
+                to_delete = session.execute(stmt).scalars().all()
+                if to_delete:
+                    session.execute(
+                        delete(ProcessSchedule).where(ProcessSchedule.id.in_(to_delete))
+                    )
+                    session.commit()
+                    SERVER_LOGGER.info(
+                        "[PROCESSES] removed from schedule: %s", to_delete
+                    )
+                    killing.difference_update(to_delete)
+            except OperationalError:
+                # for sqlite only, database could be locked by worker writing
+                session.rollback()
+                poll_sleep.sleep = False
+                continue
+
             # iterate through active processes
             process: ProcessSchedule
             for process in session.execute(select_processes).scalars():
-
-                # if the process has already terminated, remove it from active processes
-                # TODO is this too slow?
-                if process.node.is_terminated:
-                    process_id = process.id
-                    try:
-                        session.delete(process)
-                        session.commit()
-                    except OperationalError:
-                        # for sqlite only, database could be locked by worker writing
-                        session.rollback()
-                    killing.discard(process_id)
-                    continue
 
                 if process.worker_pid is None:
                     # get worker to run process, adding to worker with least processes
@@ -270,6 +343,8 @@ async def coordinate_processes(
                     if nprocs < MAX_PROCS_PER_WORKER:
                         if await continue_process(process, session, workers[pid]):
                             worker_procs[pid] += 1
+                    else:
+                        poll_sleep.sleep = False
 
                 if process.worker_pid is None:
                     continue
@@ -303,7 +378,7 @@ async def coordinate_processes(
                         )
                     except Exception:
                         SERVER_LOGGER.exception(
-                            "[PROCESS] Failed to send kill to worker", worker.pid
+                            "[PROCESS] Failed to send kill to worker %s", worker.pid
                         )
 
                 # TODO pause/play

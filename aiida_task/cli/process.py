@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 from aiida_task.database import TERMINATED_STATES, Node, ProcessSchedule
 from aiida_task.shared import MAX_PROCS_PER_WORKER
 
-from .daemon import OPT_WORKDIR, push_to_coordinator
+from .daemon import OPT_WORKDIR, send_push_notification
 from .main import DatabaseContext, main, pass_db
 
 
@@ -37,9 +37,11 @@ def remove(db: DatabaseContext):
 
 
 @process.command("status")
+@OPT_WORKDIR
 @pass_db
-def status(db: DatabaseContext):
+def status(db: DatabaseContext, workdir: str):
     """Show the status of the processes in the database"""
+    send_push_notification(workdir)
     with db as session:
         node_count = session.scalar(select(func.count(Node.id)))
         proc_count = session.scalar(select(func.count(ProcessSchedule.id)))
@@ -92,9 +94,11 @@ def process_list(db: DatabaseContext, last: int):
 
 @process.command("scheduled")
 @click.option("-l", "--last", type=int, default=10, show_default=True)
+@OPT_WORKDIR
 @pass_db
-def process_list_active(db: DatabaseContext, last: int):
+def process_list_active(db: DatabaseContext, last: int, workdir: str):
     """List the process scheduled to run in the database"""
+    send_push_notification(workdir)
     with db as session:
         result = session.execute(
             select(
@@ -133,7 +137,7 @@ def submit(db: DatabaseContext, number: int, workdir: str):
                 click.echo("Database locked, skipping!")
                 session.rollback()
             # to test push throttling, we push after every submit
-            push_to_coordinator(workdir)
+            send_push_notification(workdir)
 
 
 @process.command("kill")
@@ -154,5 +158,5 @@ def kill(db: DatabaseContext, pk: int, workdir: str):
             .values(action="kill")
         )
         session.commit()
-    push_to_coordinator(workdir)
+    send_push_notification(workdir)
     click.echo(f"Scheduled node pk {pk} to be killed")
