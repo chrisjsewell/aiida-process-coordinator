@@ -1,4 +1,5 @@
 """Mock AiiDA database"""
+
 import os
 from datetime import datetime as timezone
 
